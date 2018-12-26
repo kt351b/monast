@@ -10,6 +10,8 @@ import time
 import logging
 import optparse
 
+from operator import itemgetter, attrgetter, methodcaller
+
 from ConfigParser import SafeConfigParser, NoOptionError
 
 try:
@@ -69,6 +71,7 @@ logging.DUMPOBJECTS = False
 logging.FORMAT      = "[%(asctime)s] %(levelname)-8s :: %(message)s" 
 logging.NOTICE      = 60
 logging.addLevelName(logging.NOTICE, "NOTICE")
+#logging.basicConfig(level = logging.DEBUG)
 
 class ColorFormatter(logging.Formatter):
 	__colors = {
@@ -276,7 +279,8 @@ class MonastHTTP(resource.Resource):
 			session.startCheckingExpiration()
 			session.notifyOnExpire(self._expireSession)
 			session.updates            = []
-			session.isAuthenticated    = not self.monast.authRequired
+			#session.isAuthenticated    = not self.monast.authRequired
+			session.isAuthenticated    = self.monast.authRequired
 			session.username           = None
 			self.sessions[session.uid] = session
 		
@@ -338,11 +342,12 @@ class MonastHTTP(resource.Resource):
 		session    = request.getSession()
 		server     = self.monast.servers.get(servername)
 		
+		log.debug(" request = %s" % request)
 		## Clear Updates
 		session.updates = []
 		
 		tmp[servername] = {
-			'peers': [],
+			'peers': {},
 			'channels': [],
 			'bridges': [],
 			'meetmes': [],
@@ -354,9 +359,15 @@ class MonastHTTP(resource.Resource):
 		}
 		## Peers
 		for tech, peerlist in server.status.peers.items():
+			tmp[servername]['peers'][tech] = []
 			for peername, peer in peerlist.items():
-				tmp[servername]['peers'].append(peer.__dict__)
-			tmp[servername]['peers'].sort(lambda x, y: cmp(x.get(self.monast.sortPeersBy), y.get(self.monast.sortPeersBy)))
+				tmp[servername]['peers'][tech].append(peer.__dict__)
+			#tmp[servername]['peers'][tech].sort(lambda x, y: cmp(x.get(self.monast.sortPeersBy), y.get(self.monast.sortPeersBy)))
+			# mysort
+                        tmp[servername]['peers'][tech].sort(lambda x, y: cmp(x.get('channel'), y.get('channel')))
+                        tmp[servername]['peers'][tech].sort(lambda x, y: cmp(x.get('status'), y.get('status')))
+                        tmp[servername]['peers'][tech].sort(lambda x, y: cmp(x.get('peergroup'), y.get('peergroup')))
+                        # end of mysort
 		## Channels
 		for uniqueid, channel in server.status.channels.items():
 			tmp[servername]['channels'].append(channel.__dict__)
@@ -379,11 +390,17 @@ class MonastHTTP(resource.Resource):
 		## Queues
 		for queuename, queue in server.status.queues.items():
 			tmp[servername]['queues'].append(queue.__dict__)
-		tmp[servername]['queues'].sort(lambda x, y: cmp(x.get('queue'), y.get('queue')))
+		#tmp[servername]['queues'].sort(lambda x, y: cmp(x.get('queue'), y.get('queue')))
+                # mysort
+                #tmp[servername]['queues'].sort(lambda x, y: cmp(x.get('queue'), y.get('queue')), reverse = True)
+                tmp[servername]['queues'].sort(lambda x, y: cmp(x.get('mapname'), y.get('mapname')))
+                # end of mysort
 		for (queuename, membername), member in server.status.queueMembers.items():
 			member.pausedur = int(time.time() - member.pausedat)
 			tmp[servername]['queueMembers'].append(member.__dict__)
-		tmp[servername]['queueMembers'].sort(lambda x, y: cmp(x.get('name'), y.get('name')))
+		#tmp[servername]['queueMembers'].sort(lambda x, y: cmp(x.get('name'), y.get('name')))
+		tmp[servername]['queueMembers'].sort(lambda x, y: cmp(x.get('callstaken'), y.get('callstaken')), reverse = True)
+		tmp[servername]['queueMembers'].sort(lambda x, y: cmp(x.get('status'), y.get('status')))
 		for (queuename, uniqueid), client in server.status.queueClients.items():
 			client.seconds = int(time.time() - client.jointime)
 			tmp[servername]['queueClients'].append(client.__dict__)
@@ -394,8 +411,7 @@ class MonastHTTP(resource.Resource):
 				call.seconds = int(time.time() - call.starttime)  
 				tmp[servername]['queueCalls'].append(call.__dict__)
 					 
-		#request.write(json.dumps(tmp, encoding = "ISO8859-1"))
-		request.write(json.dumps(tmp))
+		request.write(json.dumps(tmp, encoding = "ISO8859-1"))
 		request.finish()
 	
 	def getUpdates(self, request):
@@ -406,8 +422,7 @@ class MonastHTTP(resource.Resource):
 			updates         = [u for u in session.updates if u.get('servername') == servername]
 			session.updates = []
 		if len(updates) > 0:
-			#request.write(json.dumps(updates, encoding = "ISO8859-1"))
-			request.write(json.dumps(updates))
+			request.write(json.dumps(updates, encoding = "ISO8859-1"))
 		else:
 			request.write("NO UPDATES")
 		request.finish()
@@ -418,8 +433,7 @@ class MonastHTTP(resource.Resource):
 		if self.monast.authRequired and session.isAuthenticated and session.username:
 			servers = self.monast.authUsers[session.username].servers.keys()
 		servers.sort()		
-		#request.write(json.dumps(servers, encoding = "ISO8859-1"))
-		request.write(json.dumps(servers))
+		request.write(json.dumps(servers, encoding = "ISO8859-1"))
 		request.finish()
 	
 	def doAction(self, request):
@@ -433,83 +447,33 @@ class MonastHTTP(resource.Resource):
 ## Monast AMI
 ##
 class MonastAMIProtocol(manager.AMIProtocol):
-	
-	MAX_LENGTH = 1024 * 1024 * 8
-	
+	"""Class Extended to solve some issues on original methods"""
 	def connectionLost(self, reason):
 		"""Connection lost, clean up callbacks"""
-		for key, callable in self.actionIDCallbacks.items():
+		for key,callable in self.actionIDCallbacks.items():
 			try:
 				callable(tw_error.ConnectionDone("""AMI connection terminated"""))
 			except Exception, err:
 				log.error("""Failure during connectionLost for callable %s: %s""", callable, err)
 		self.actionIDCallbacks.clear()
 		self.eventTypeCallbacks.clear()
-	
-	def dispatchIncoming(self):
-		"""Dispatch any finished incoming events/messages"""
-		log.debug('Dispatch Incoming')
-		message = {}
-		while self.messageCache:
-			line = self.messageCache.pop(0)
-			line = line.strip()
-			if line:
-				if line.endswith(self.END_DATA):
-					# multi-line command results...
-					line = line[0:-len(self.END_DATA)]
-					message['output'] = '\r\n'.join(line.split('\n'))
-				else:
-					# regular line...
-					if line.startswith(self.VERSION_PREFIX):
-						self.amiVersion = line[len(self.VERSION_PREFIX) + 1:].strip()
-					else:
-						try:
-							key, value = line.split(':', 1)
-						except ValueError, err:
-							# XXX data-safety issues, what prevents the
-							# VERSION_PREFIX from showing up in a data-set?
-							log.warn("Improperly formatted line received and "
-									"ignored: %r", line)
-						else:
-							key = key.lower().strip()
-							if key in message:
-								message[key] += '\r\n' + value.strip()
-							else:
-								message[key] = value.strip();
-		log.debug('Incoming Message: %s', message)
-		if 'actionid' in message:
-			key = message['actionid']
-			callback = self.actionIDCallbacks.get(key)
-			if callback:
-				try:
-					callback(message)
-				except Exception, err:
-					# XXX log failure here...
-					pass
-		# otherwise is a monitor message or something we didn't send...
-		if 'event' in message:
-			self.dispatchEvent(message)
-	
+		
 	def collectDeferred(self, message, stopEvent):
 		"""Collect all responses to this message until stopEvent or error
-
-		returns deferred returning sequence of events/responses
+		   returns deferred returning sequence of events/responses
 		"""
 		df = defer.Deferred()
 		cache = []
-
 		def onEvent(event):
 			if type(event) == type(dict()):
 				if event.get('response') == 'Error':
 					df.errback(AMICommandFailure(event))
-				elif event.get('event') == stopEvent:
-					cache.append(event)
-					df.callback([e for e in cache if e.get("eventlist", "").lower() not in ("start", "complete")])
+				elif event['event'] == stopEvent:
+					df.callback(cache)
 				else:
 					cache.append(event)
 			else:
 				df.errback(AMICommandFailure(event))
-
 		actionid = self.sendMessage(message, onEvent)
 		df.addCallbacks(
 			self.cleanup, self.cleanup,
@@ -518,50 +482,12 @@ class MonastAMIProtocol(manager.AMIProtocol):
 		return df
 	
 	def errorUnlessResponse(self, message, expected='Success'):
-		"""Raise AMICommandFailure error unless message['response'] == expected
-
+		"""Raise a AMICommandFailure error unless message['response'] == expected
 		If == expected, returns the message
 		"""
-		if type(expected) == type(str()):
-			expected = [expected]
-		if not 'Follows' in expected:
-			expected.append("Follows")
-		if not 'Success' in expected:
-			expected.append("Success")
-
-		if type(message) == type(dict()) and message['response'] not in expected:
+		if type(message) == type(dict()) and message['response'] != expected or type(message) != type(dict()):
 			raise AMICommandFailure(message)
 		return message
-	
-	def command(self, command):
-		"""Run asterisk CLI command, return deferred result for list of lines
-
-		returns deferred returning list of lines (strings) of the command
-		output.
-
-		See listCommands to see available commands
-		"""
-		message = {
-			'action': 'command',
-			'command': command
-		}
-		df = self.sendDeferred(message)
-		#df.addCallback(self.errorUnlessResponse, expected=['Follows', 'Success'])
-		from distutils.version import LooseVersion
-		if LooseVersion(self.amiVersion) > LooseVersion('2.7.0'):
-			df.addCallback(self.errorUnlessResponse)
-		else:
-			df.addCallback(self.errorUnlessResponse, expected='Follows')
-
-		def onResult(message):
-			if not isinstance(message, dict):
-				return message
-			try:
-				return message[' ']
-			except:
-				return message['output'].split ('\r\n')
-
-		return df.addCallback(onResult)
 	
 	def redirect(self, channel, context, exten, priority, extraChannel = None, extraContext = None, extraExten = None, extraPriority = None):
 		"""Transfer channel(s) to given context/exten/priority"""
@@ -596,27 +522,18 @@ class MonastAMIProtocol(manager.AMIProtocol):
 		if stateinterface is not None:
 			message['stateinterface'] = stateinterface
 		return self.sendDeferred(message).addCallback(self.errorUnlessResponse)
-	
-	def bridgelist(self, bridgetype=None):
-		message = {
-			'action': 'BridgeList'
-		}
-		if bridgetype:
-			message['bridgetype'] = bridgetype
-		return self.collectDeferred(message, 'BridgeListComplete')
 
 
 class MonastAMIFactory(manager.AMIFactory):
 	amiWorker  = None
 	servername = None
 	protocol   = MonastAMIProtocol
-	
 	def __init__(self, servername, username, password, amiWorker):
 		log.info('Server %s :: Initializing Monast AMI Factory...' % servername)
 		self.servername = servername
 		self.amiWorker  = amiWorker
 		manager.AMIFactory.__init__(self, username, password)
-	
+		
 	def clientConnectionLost(self, connector, reason):
 		log.warning("Server %s :: Lost connection to AMI: %s" % (self.servername, reason.value))
 		self.amiWorker.__disconnected__(self.servername)
@@ -626,22 +543,21 @@ class MonastAMIFactory(manager.AMIFactory):
 		log.error("Server %s :: Failed to connected to AMI: %s" % (self.servername, reason.value))
 		self.amiWorker.__disconnected__(self.servername)
 		reactor.callLater(AMI_RECONNECT_INTERVAL, self.amiWorker.connect, self.servername)
-	
-			
+		
 class Monast:
 
 	configFile         = None
 	servers            = {}
-	sortPeersBy        = 'callerid'
+	#sortPeersBy        = 'callerid'
+	sortPeersBy        = 'peername'
 	clientActions      = []
 	authRequired       = False
 	isParkedCallStatus = False
-	
+        dnd_list           = []
 	def __init__(self, configFile):
 		log.log(logging.NOTICE, "Initializing Monast AMI Interface...")
 		
 		self.eventHandlers = {
-			'UserEvent'           : self.handlerEventUserEvent,
 			'Reload'              : self.handlerEventReload,
 			'ChannelReload'       : self.handlerEventChannelReload,
 			'Alarm'               : self.handlerEventAlarm,
@@ -650,47 +566,30 @@ class Monast:
 			'PeerEntry'           : self.handlerEventPeerEntry,
 			'PeerStatus'          : self.handlerEventPeerStatus,
 			'Newchannel'          : self.handlerEventNewchannel,
-			'DAHDIChannel'        : self.handlerEventDAHDIChannel,
-			'Newstate'            : self.handlerEventNewstate,
+			'NewState'            : self.handlerEventNewState,
 			'Rename'              : self.handlerEventRename,
 			'Masquerade'          : self.handlerEventMasquerade,
 			'Newcallerid'         : self.handlerEventNewcallerid,
 			'NewCallerid'         : self.handlerEventNewcallerid,
 			'Hangup'              : self.handlerEventHangup,
 			'Dial'                : self.handlerEventDial,
-			'DialBegin'           : self.handlerEventDialBegin, # Asterisk 13
+                        'DialBegin'           : self.handlerEventDialBegin,
 			'Link'                : self.handlerEventLink,
 			'Unlink'              : self.handlerEventUnlink,
 			'Bridge'              : self.handlerEventBridge,
-			
-			'BridgeCreate'        : self.handlerEventBridgeCreate,
-			'BridgeEnter'         : self.handlerEventBridgeEnter,
-			'BridgeLeave'         : self.handlerEventBridgeLeave,
-			'BridgeDestroy'       : self.handlerEventBridgeDestroy,
-			
 			'MeetmeJoin'          : self.handlerEventMeetmeJoin,
 			'MeetmeLeave'         : self.handlerEventMeetmeLeave,
-			
-			'ConfbridgeJoin'      : self.handlerEventConfbridgeJoin,
-			'ConfbridgeLeave'     : self.handlerEventConfbridgeLeave,
-			
 			'ParkedCall'          : self.handlerEventParkedCall,
 			'UnParkedCall'        : self.handlerEventUnParkedCall,
 			'ParkedCallTimeOut'   : self.handlerEventParkedCallTimeOut,
 			'ParkedCallGiveUp'    : self.handlerEventParkedCallGiveUp,
 			'QueueMemberAdded'    : self.handlerEventQueueMemberAdded,
 			'QueueMemberRemoved'  : self.handlerEventQueueMemberRemoved,
-			
-			'Join'                : self.handlerEventJoin, # Queue Join
-			'Leave'               : self.handlerEventLeave, # Queue Leave
-			
-			'QueueCallerJoin'     : self.handlerEventJoin,
-			'QueueCallerLeave'    : self.handlerEventLeave,
-			
+			'QueueCallerJoin'     : self.handlerEventJoin, 
+			'QueueCallerLeave'    : self.handlerEventLeave, 
 			'QueueCallerAbandon'  : self.handlerEventQueueCallerAbandon,
 			'QueueMemberStatus'   : self.handlerEventQueueMemberStatus,
-			'QueueMemberPaused'   : self.handlerEventQueueMemberPaused,
-			'QueueMemberPause'    : self.handlerEventQueueMemberPaused, # Asterisk 14
+			'QueueMemberPause'    : self.handlerEventQueueMemberPause,
 			'MonitorStart'        : self.handlerEventMonitorStart,
 			'MonitorStop'         : self.handlerEventMonitorStop,
 			'AntennaLevel'        : self.handlerEventAntennaLevel,
@@ -698,7 +597,26 @@ class Monast:
 			'BranchOffHook'       : self.handlerEventBranchOffHook,
 			'ChanSpyStart'        : self.handlerEventChanSpyStart,
 			'ChanSpyStop'         : self.handlerEventChanSpyStop,
+			'UserEvent'           : self.handlerEventUserEvent,
 		}
+		
+		#self.actionHandlers = {
+		#	'CliCommand'         : ('command', self.clientAction_CliCommand),
+		#	'RequestInfo'        : ('command', self.clientAction_RequestInfo),
+		#	'Originate'          : ('originate', self.clientAction_Originate),
+		#	'Transfer'           : ('originate', self.clientAction_Transfer),
+		#	'Park'               : ('originate', self.clientAction_Park),
+		#	'Hangup'       	     : ('originate', self.clientAction_Hangup),
+		#	'MonitorStart'       : ('originate', self.clientAction_MonitorStart),
+		#	'MonitorStop'        : ('originate', self.clientAction_MonitorStop),
+		#	'QueueMemberPause'   : ('queue', self.clientAction_QueueMemberPause),
+		#	'QueueMemberPause'   : ('queue', self.clientAction_QueueMemberPause),
+		#	'QueueMemberUnpause' : ('queue', self.clientAction_QueueMemberUnpause),
+		#	'QueueMemberAdd'     : ('queue', self.clientAction_QueueMemberAdd),
+		#	'QueueMemberRemove'  : ('queue', self.clientAction_QueueMemberRemove),
+		#	'MeetmeKick'         : ('originate', self.clientAction_MeetmeKick),
+		#	'SpyChannel'         : ('spy', self.clientAction_SpyChannel),
+		#}
 		
 		self.actionHandlers = {
 			'CliCommand'         : ('command', self.clientAction_CliCommand),
@@ -709,18 +627,21 @@ class Monast:
 			'Hangup'       	     : ('originate', self.clientAction_Hangup),
 			'MonitorStart'       : ('originate', self.clientAction_MonitorStart),
 			'MonitorStop'        : ('originate', self.clientAction_MonitorStop),
-			'QueueMemberPause'   : ('queue', self.clientAction_QueueMemberPause),
-			'QueueMemberUnpause' : ('queue', self.clientAction_QueueMemberUnpause),
-			'QueueMemberAdd'     : ('queue', self.clientAction_QueueMemberAdd),
-			'QueueMemberRemove'  : ('queue', self.clientAction_QueueMemberRemove),
+			'QueuePause'         : ('queue', self.clientAction_QueuePause),
+			'QueueUnpause'       : ('queue', self.clientAction_QueueUnpause),
+			'QueueAdd'           : ('queue', self.clientAction_QueueAdd),
+			'QueueRemove'        : ('queue', self.clientAction_QueueRemove),
 			'MeetmeKick'         : ('originate', self.clientAction_MeetmeKick),
 			'SpyChannel'         : ('spy', self.clientAction_SpyChannel),
 		}
-		
 		self.configFile = configFile
 		self.__parseMonastConfig()
-		
-	def __start(self):
+                self._dnd_list_read()
+                #self._dnd_list_add(909)
+                #self._dnd_list_add(908)
+                #self._dnd_list_delete(909)
+
+        def __start(self):
 		log.info("Starting Monast Services...")
 		for servername in self.servers:
 			reactor.callWhenRunning(self.connect, servername)
@@ -734,8 +655,8 @@ class Monast:
 		
 		## Request Server Version
 		def _onCoreShowVersion(result):
-			versions = [1.4, 1.6, 1.8, 13, 14]
-			log.info("Server %s :: %s" % (servername, result[0]))
+			versions = [1.4, 1.6, 1.8]
+			log.info("Server %s :: %s" %(servername, result[0]))
 			for version in versions:
 				if "Asterisk %s" % version in result[0]:
 					server.version = version
@@ -807,23 +728,35 @@ class Monast:
 					if len(server.peergroups.keys()) > 0:
 						peer.peergroup = "No Group"
 			
-			peer.context      = kw.get('context', server.default_context)
-			peer.variables    = kw.get('variables', [])
-			peer.status       = kw.get('status', '--')
-			peer.customStatus = kw.get('customStatus', '')
-			peer.time         = kw.get('time', -1)
-			peer.calls        = int(kw.get('calls', 0))
+			peer.context     = kw.get('context', server.default_context)
+			peer.variables   = kw.get('variables', [])
+			peer.status      = kw.get('status', '--')
+			peer.time        = kw.get('time', -1)
+			peer.calls       = int(kw.get('calls', 0))
 			
-			## Dahdi Specific attributes
+                        # My status
+                        if peer.status.startswith('OK') and peer.peername not in self.dnd_list:
+			        peer.status = 'Registered'
+                        elif peer.status.startswith('OK') and peer.peername in self.dnd_list:  
+                                peer.status = 'DND'
+		        elif peer.status.find('(') != -1:
+			       peer.status = status[0:status.find('(')]
+                               if peer.peername in self.dnd.list:
+                                   # self.dnd_list.remove(peer.peername)
+                                    self._dnd_list_delete(peer.peername)
+                                    log.debug("Server %s :: Removed from dnd_list peername: %s, dnd_list: %s" % servername, peer.peername,','.join(self.dnd_list))
+                        # End of My status
+
+                        ## Dahdi Specific attributes
 			if channeltype == 'DAHDI':
-				peer.signalling = kw.get('signalling', "")
+				peer.signalling = kw.get('signalling')
 				peer.alarm      = kw.get('alarm', '--')
 				peer.dnd        = kw.get('dnd', 'disabled').lower() == 'enabled'
 				peer.status     = ['--', peer.alarm][peer.status == '--']
 				if peer.callerid == "--":
 					if peer.peername.isdigit():
 						peer.callerid = [peer.channel, "%s %02d" % (peer.signalling, int(peer.peername))][peer.callerid == '--']
-					elif peer.signalling:
+					else:
 						peer.callerid = [peer.channel, "%s %s" % (peer.signalling, peer.peername)][peer.callerid == '--']
 				
 			## Khomp
@@ -833,7 +766,7 @@ class Monast:
 					peer.callerid = [peer.callerid, peer.channel][peer.callerid == '--']
 					peer.callerid = [peer.channel, "KGSM %s" % peer.peername]['Signal' in peer.status]
 				
-			log.debug("Server %s :: Adding User/Peer %s %s", servername, peer.channel, _log)
+			log.debug("Server %s :: _createPeer Adding User/Peer %s %s", servername, peer.channel, _log)
 			server.status.peers[peer.channeltype][peer.peername] = peer
 			
 			if logging.DUMPOBJECTS:
@@ -845,26 +778,54 @@ class Monast:
 		channeltype = kw.get('channeltype')
 		peername    = kw.get('peername')
 		_log        = kw.get('_log', '')
-		try:
+		status      = kw.get('status')
+                log.debug("Server  ::----- _updatePeer Entry ----  peername: %s status: %s ", peername, status)
+		
+                try:
 			peer = self.servers.get(servername).status.peers.get(channeltype, {}).get(peername)
 			if peer:
-				log.debug("Server %s :: Updating User/Peer %s/%s %s", servername, channeltype, peername, _log)
-				for k, v in kw.items():
+                                log.debug("Server %s :: _updatePeer START Updating User/Peer %s/%s %s peerstatus: %s", servername, channeltype, peername, _log, status)
+
+                                for k, v in kw.items():
 					if k == '_action':
 						if v == 'increaseCallCounter':
 							peer.calls += 1
 						elif v == 'decreaseCallCounter':
 							peer.calls -= 1
-					# Ignore callerid on forced peers
+                                        if k == 'peername':
+                                            log.debug("Entered to if k == 'peername'  peername: %s ---- v = %s " %( peername, v))
+                                            if v in self.dnd_list:
+                                                log.debug("Entered to if 'peername' in dnd_list  peername: %s BEFORE peerstatus: %s" %( peername, peer.status))
+                                                if (peer.status == 'Registered' or peer.status == 'None' or peer.status == 'Reachable'):
+                                                    peer.status = 'DND'
+                                                    log.debug("Entered to if 'peername' in dnd_list  peername: %s AFTER peerstatus: %s" %( peername, peer.status))
+                                                if (peer.status == 'Unreachable' or peer.status == 'Unregistered' or peer.status == 'Unknown'):
+                                                    peer.status = 'UNKNOWN'
+                                                    log.debug("Entered to if 'peername' in dnd_list  peername: %s AFTER peerstatus: %s" %( peername, peer.status))
+                                                log.debug("Entered to if 'peername' in dnd_list  peername: %s AFTER peerstatus: %s" %( peername, peer.status))
+                                            elif v not in self.dnd_list :
+                                                log.debug("Entered to if 'peername' NOT in dnd_list  peername: %s BEFORE peerstatus: %s" %( peername, peer.status))
+                                                if peer.status == 'Registered' or peer.status == 'None' or peer.status == 'DND' or peer.status == 'Reachable':
+                                                    peer.status = 'Registered'
+                                                    log.debug("Entered to if 'peername' in dnd_list  peername: %s AFTER peerstatus: %s" %( peername, peer.status))
+                                                if (peer.status == 'Unreachable' or peer.status == 'Unregistered' or peer.status == 'Unknown' or peer.status == 'DND'):
+                                                    peer.status = 'UNKNOWN'
+                                                    log.debug("Entered to if 'peername' in dnd_list  peername: %s AFTER peerstatus: %s" %( peername, peer.status))
+                                                    log.debug("Entered to if 'peername' in dnd_list  peername: %s AFTER peerstatus: %s" %( peername, peer.status))
+                                        ## Ignore callerid on forced peers
 					if k == "callerid" and peer.forcedCid:
 						continue
 					# Update peer
 					if k not in ('_log', '_action'): 
 						if peer.__dict__.has_key(k):
 							peer.__dict__[k] = v
+                                                        log.debug("Entered to peer.__dict__[k - %s ] = v - %s" %( k , v))
 						else:
 							log.warning("Server %s :: User/Peer %s/%s does not have attribute %s", servername, channeltype, peername, k)
-				self.http._addUpdate(servername = servername, **peer.__dict__.copy())
+
+
+                                log.debug("Server %s :: _updatePeer SEND COMMAND Updating User/Peer %s/%s %s peerstatus: %s", servername, channeltype, peername, _log, peer.status)
+                                self.http._addUpdate(servername = servername, **peer.__dict__.copy())
 				if logging.DUMPOBJECTS:
 					log.debug("Object Dump:%s", peer)
 			#else:
@@ -880,19 +841,15 @@ class Monast:
 		_log          = kw.get('_log', '')
 		
 		if not server.status.channels.has_key(uniqueid):
-			chan                = GenericObject("Channel")
-			chan.uniqueid       = uniqueid
-			chan.channel        = channel
-			chan.dahdispan      = None
-			chan.dahdichannel   = None
-			chan.state          = kw.get('state', 'Unknown')
-			chan.calleridnum    = kw.get('calleridnum', '')
-			chan.calleridname   = kw.get('calleridname', '')
-			chan.monitor        = kw.get('monitor', False)
-			chan.spy            = kw.get('spy', False)
-			chan.spyer          = None
-			chan.starttime      = time.time()
-			chan.bridgeuniqueid = kw.get("bridgeuniqueid", kw.get("bridgeid"))
+			chan              = GenericObject("Channel")
+			chan.uniqueid     = uniqueid
+			chan.channel      = channel
+			chan.state        = kw.get('state', 'Unknown')
+			chan.calleridnum  = kw.get('calleridnum', '')
+			chan.calleridname = kw.get('calleridname', '')
+			chan.monitor      = kw.get('monitor', False)
+			chan.spy          = kw.get('spy', False)
+			chan.starttime    = time.time()
 			
 			log.debug("Server %s :: Channel create: %s (%s) %s", servername, uniqueid, channel, _log)
 			server.status.channels[uniqueid] = chan
@@ -911,10 +868,11 @@ class Monast:
 	
 	def _lookupChannel(self, servername, chan):
 		server  = self.servers.get(servername)
+		channel = None
 		for uniqueid, channel in server.status.channels.items():
 			if channel.channel == chan:
-				return channel
-		return None
+				break
+		return channel
 	
 	def _updateChannel(self, servername, **kw):
 		uniqueid = kw.get('uniqueid')
@@ -926,14 +884,12 @@ class Monast:
 			if chan:
 				log.debug("Server %s :: Channel update: %s (%s) %s", servername, uniqueid, chan.channel, _log)
 				for k, v in kw.items():
-					if k not in ('_log', '_action'):
+					if k not in ('_log'):
 						if chan.__dict__.has_key(k):
 							chan.__dict__[k] = v
 						else:
 							log.warning("Server %s :: Channel %s (%s) does not have attribute %s", servername, uniqueid, chan.channel, k)
 				self.http._addUpdate(servername = servername, subaction = 'Update', **chan.__dict__.copy())
-				if kw.get("_action") == "updateDahdiCallsCounter":
-					self._updatePeer(servername, channeltype = "DAHDI", peername = kw.get("dahdichannel"), _action = 'increaseCallCounter')
 				if logging.DUMPOBJECTS:
 					log.debug("Object Dump:%s", chan)
 			else:
@@ -960,8 +916,6 @@ class Monast:
 				self.http._addUpdate(servername = servername, action = 'RemoveChannel', uniqueid = uniqueid)
 				
 				channeltype, peername = channel.rsplit('-', 1)[0].split('/', 1)
-				if channeltype == "DAHDI" and chan.dahdichannel is not None:
-					peername = chan.dahdichannel
 				self._updatePeer(servername, channeltype = channeltype, peername = peername, _action = 'decreaseCallCounter')
 				
 				if logging.DUMPOBJECTS:
@@ -1007,7 +961,6 @@ class Monast:
 			return True
 		else:
 			log.warning("Server %s :: Bridge already exists: %s (%s) with %s (%s)", servername, uniqueid, channel, bridgeduniqueid, bridgedchannel)
-			self._updateBridge(servername, **kw)
 		return False
 	
 	def _updateBridge(self, servername, **kw):
@@ -1149,23 +1102,23 @@ class Monast:
 	## Parked Calls
 	def _createParkedCall(self, servername, **kw):
 		server     = self.servers.get(servername)
-		channel    = kw.get('channel', kw.get('parkeechannel'))
+		channel    = kw.get('channel')
 		parked     = server.status.parkedCalls.get(channel)
 		_log       = kw.get('_log', '')
 		
 		if not parked:
 			parked = GenericObject('ParkedCall')
 			parked.channel      = channel
-			parked.parkedFrom   = kw.get('from', kw.get('parkerdialstring'))
-			parked.calleridname = kw.get('calleridname', kw.get('parkeecalleridname'))
-			parked.calleridnum  = kw.get('calleridnum', kw.get('parkeecalleridnum'))
-			parked.exten        = kw.get('exten', kw.get('parkingspace'))
-			parked.timeout      = int(kw.get('timeout', kw.get('parkingtimeout')))
+			parked.parkedFrom   = kw.get('from')
+			parked.calleridname = kw.get('calleridname')
+			parked.calleridnum  = kw.get('calleridnum')
+			parked.exten        = kw.get('exten')
+			parked.timeout      = int(kw.get('timeout'))
 			
 			# locate "from" channel
 			fromChannel = None
 			for uniqueid, fromChannel in server.status.channels.items():
-				if parked.parkedFrom == fromChannel.channel or parked.parkedFrom in fromChannel.channel:
+				if parked.parkedFrom == fromChannel.channel:
 					parked.calleridnameFrom = fromChannel.calleridname
 					parked.calleridnumFrom = fromChannel.calleridnum
 					break
@@ -1180,7 +1133,7 @@ class Monast:
 				log.warning("Server %s :: ParkedCall already exists: %s at %s", servername, parked.channel, parked.exten)
 				
 	def _removeParkedCall(self, servername, **kw):
-		channel    = kw.get('channel', kw.get('parkeechannel'))
+		channel    = kw.get('channel')
 		_log       = kw.get('_log', '')
 		
 		try:
@@ -1198,6 +1151,17 @@ class Monast:
 			log.exception("Server %s :: Unhandled exception removing ParkedCall: %s", servername, channel)
 	
 	## Queues
+
+        def _checkMemberDND(self, membername, servername, queuename, location, _log, statustext):
+                log.debug("Server %s :: Entered to _checkMemberDNDStatus Queue update, member update: %s -> %s %s, member.status = %s", servername, queuename, location, _log, statustext )
+                queuepeer = membername.split('/',1)[1]
+                if queuepeer in self.dnd_list:
+                     statustext = 'DND'
+                     log.debug("Server %s ::  _checkMemberDNDStatus Member %s is in dnd_list. Queue update, member updated: %s -> %s %s, New member.statustext = %s", servername, queuepeer, queuename, location, _log, statustext)
+                log.debug("Server %s :: _checkMemberDNDStatus Member %s is NOT in dnd_list. Queue update, member updated: %s -> %s %s, member.statustext = get('status')" , servername, queuepeer, queuename, location, _log)
+						
+                return statustext
+
 	def _createQueue(self, servername, **kw):
 		server    = self.servers.get(servername)
 		queuename = kw.get('queue')
@@ -1254,9 +1218,12 @@ class Monast:
 						log.debug("Object Dump:%s", queue)
 					return
 				
-				if event in ("QueueMember", "QueueMemberAdded", "QueueMemberStatus", "QueueMemberPaused"):
+				if event in ("QueueMember", "QueueMemberAdded", "QueueMemberStatus", "QueueMemberPause"):
+
+					#location   = kw.get('location')
+					#location   = kw.get('interface')
 					location   = kw.get('location', kw.get('interface'))
-					membername = kw.get('name', kw.get('membername'))
+                                        membername = kw.get('name', kw.get('membername'))
 					if server.queueMapMember.has_key(location):
 						membername = server.queueMapMember[location]
 					memberid = (queuename, location)
@@ -1276,7 +1243,11 @@ class Monast:
 						member.penalty    = kw.get('penalty')
 						member.status     = kw.get('status')
 						member.statustext = AST_DEVICE_STATES.get(member.status, 'Unknown')
-						self.http._addUpdate(servername = servername, **member.__dict__.copy())
+                                                
+                                                statustext = member.statustext
+                                                member.statustext = self._checkMemberDND(membername, servername, queuename, location, _log, statustext)
+						
+                                                self.http._addUpdate(servername = servername, **member.__dict__.copy())
 					else:
 						log.debug("Server %s :: Queue update, member updated: %s -> %s %s", servername, queuename, location, _log)
 						member.name       = membername
@@ -1285,11 +1256,15 @@ class Monast:
 						member.lastcall   = kw.get('lastcall', 0)
 						member.membership = kw.get('membership')
 						member.paused     = kw.get('paused')
-						member.pausedat   = [member.pausedat, time.time()][event == "QueueMemberPaused" and member.paused == '1']
+						member.pausedat   = [member.pausedat, time.time()][event == "QueueMemberPause" and member.paused == '1']
 						member.pausedur   = int(time.time() - member.pausedat)
 						member.penalty    = kw.get('penalty')
 						member.status     = kw.get('status')
 						member.statustext = AST_DEVICE_STATES.get(member.status, 'Unknown')
+
+                                                statustext = member.statustext
+                                                member.statustext = self._checkMemberDND(membername, servername, queuename, location, _log, statustext)
+
 						self.http._addUpdate(servername = servername, subaction = 'Update', **member.__dict__.copy())
 					server.status.queueMembers[memberid] = member
 					if logging.DUMPOBJECTS:
@@ -1297,8 +1272,9 @@ class Monast:
 					return
 				
 				if event == "QueueMemberRemoved":
+					#location = kw.get('location')
 					location   = kw.get('location', kw.get('interface'))
-					memberid = (queuename, location)
+                                        memberid = (queuename, location)
 					member   = server.status.queueMembers.get(memberid)
 					if member:
 						log.debug("Server %s :: Queue update, member removed: %s -> %s %s", servername, queuename, location, _log)
@@ -1310,7 +1286,7 @@ class Monast:
 						log.warning("Server %s :: Queue Member does not exists: %s -> %s", servername, queuename, location)
 					return
 				
-				if event in ("QueueEntry", "Join", "QueueCallerJoin"):
+				if event in ("QueueEntry", "QueueCallerJoin"):
 					uniqueid = kw.get('uniqueid', None)
 					if not uniqueid:
 						# try to found uniqueid based on channel name
@@ -1321,7 +1297,7 @@ class Monast:
 					clientid = (queuename, uniqueid) 
 					client   = server.status.queueClients.get(clientid)
 					if not client:
-						log.debug("Server %s :: Queue update, client added: %s -> %s %s", servername, queuename, uniqueid, _log)
+						log.debug("Server %s :: QueueEntry Queue update, client added: %s -> %s %s", servername, queuename, uniqueid, _log)
 						client              = GenericObject("QueueClient")
 						client.uniqueid     = uniqueid
 						client.channel      = kw.get('channel')
@@ -1343,7 +1319,7 @@ class Monast:
 						client.seconds      = int(time.time() - client.jointime)
 						self.http._addUpdate(servername = servername, subaction = 'Update', **client.__dict__.copy())
 					server.status.queueClients[clientid] = client
-					if event == "Join":
+					if event == "QueueCallerJoin":
 						queue.calls += 1
 						self.http._addUpdate(servername = servername, subaction = 'Update', **queue.__dict__.copy())
 					if logging.DUMPOBJECTS:
@@ -1365,13 +1341,29 @@ class Monast:
 						client.abandonned = True
 						queue.abandoned  += 1
 						self.http._addUpdate(servername = servername, subaction = 'Update', **queue.__dict__.copy())
+					        queue.calls    -= 1 
+						call           = GenericObject("QueueCall")
+						call.client    = client.__dict__
+						call.member    = None
+						call.link      = False
+						call.starttime = time.time()
+						call.seconds   = int(time.time() - call.starttime)
+						server.status.queueCalls[client.uniqueid] = call
+						
+						log.debug("Server %s :: Queue update, client removed: %s -> %s %s", servername, queuename, uniqueid, _log)
+						del server.status.queueClients[clientid]
+						self.http._addUpdate(servername = servername, action = 'RemoveQueueClient', uniqueid = client.uniqueid, queue = client.queue)
+
+						self.http._addUpdate(servername = servername, subaction = 'Update', **queue.__dict__.copy())
 					else:
 						log.warning("Server %s :: Queue Client does not exists: %s -> %s", servername, queuename, uniqueid)
 					return
 				
-				if event in ("Leave", "QueueCallerLeave"):
+				if event == "QueueCallerLeave":
+
 					uniqueid = kw.get('uniqueid', None)
-					if not uniqueid:
+                                        log.debug("Server %s :: Queue update, Entered to Leave: %s -> %s %s", servername, queuename, uniqueid, _log)
+                                        if not uniqueid:
 						# try to found uniqueid based on channel name
 						channel = kw.get('channel')
 						for uniqueid, chan in server.status.channels.items():
@@ -1446,7 +1438,6 @@ class Monast:
 			self.servers[servername].transfer_context = config.get(server, 'transfer_context')
 			self.servers[servername].meetme_context   = config.get(server, 'meetme_context')
 			self.servers[servername].meetme_prefix    = config.get(server, 'meetme_prefix')
-			self.servers[servername].meetmeType       = None
 			
 			self.servers[servername].connected        = False
 			self.servers[servername].factory          = MonastAMIFactory(servername, username, password, self)
@@ -1632,7 +1623,7 @@ class Monast:
 		
 		errorMessage = reason.getErrorMessage()
 		if type(reason.value) == AMICommandFailure and type(reason.value.args[0]) == type(dict()) and reason.value.args[0].has_key('message'):
-			errorMessage = reason.value.args[0].get('output', reason.value.args[0].get('message'))
+			errorMessage = reason.value.args[0].get('message')
 		
 		log.error("Server %s :: %s, reason: %s" % (servername, message, errorMessage))
 		
@@ -1712,10 +1703,9 @@ class Monast:
 			.addCallbacks(onDahdiShowChannels, onDahdiShowChannelsFailure, errbackArgs = (servername, "Error Requesting DAHDI Channels"))
 		
 		# Khomp
-		"""
 		def onKhompChannelsShow(result):
 			log.debug("Server %s :: Processing Khomp Channels..." % servername)
-			if not 'no such command' in result['output'].lower():
+			if not 'no such command' in result[0].lower():
 				reChannelGSM = re.compile("\|\s+([0-9,]+)\s+\|.*\|\s+([0-9%]+)\s+\|")
 				reChannel    = re.compile("\|\s+([0-9,]+)\s+\|")
 				for line in result:
@@ -1745,40 +1735,20 @@ class Monast:
 		log.debug("Server %s :: Requesting Khomp Channels..." % servername)
 		server.pushTask(server.ami.command, 'khomp channels show') \
 			.addCallbacks(onKhompChannelsShow, self._onAmiCommandFailure, errbackArgs = (servername, "Error Requesting Khomp Channels"))
-		"""
+		
 		# Meetme
-		def onGetHelpMeetme(result):
-			log.debug("Server %s :: Processing core show help meetme..." % servername)
-			result = "\n".join(result)
-			if not "no such command" in result.lower():
-				server.meetmeType = "meetme"
-				def onGetMeetmeConfig(result):
-					log.debug("Server %s :: Processing meetme.conf..." % servername)
-					for k, v in result.items():
-						if v.startswith("conf="):
-							meetmeroom = v.replace("conf=", "")
-							if (self.displayMeetmesDefault and not server.displayMeetmes.has_key(meetmeroom)) or (not self.displayMeetmesDefault and server.displayMeetmes.has_key(meetmeroom)):
-								self._createMeetme(servername, meetme = meetmeroom)
-								
-				log.debug("Server %s :: Requesting meetme.conf..." % servername)
-				server.pushTask(server.ami.getConfig, 'meetme.conf') \
-					.addCallbacks(onGetMeetmeConfig, self._onAmiCommandFailure, errbackArgs = (servername, "Error Requesting meetme.conf"))
-			
-		log.debug("Server %s :: Checking if server has meetme..." % servername)
-		server.pushTask(server.ami.command, "core show help meetme") \
-			.addCallbacks(onGetHelpMeetme, self._onAmiCommandFailure, errbackArgs = (servername, "Error checking meetme"))
-			
-		# Confbridge
-		def onGetHelpConfbridge(result):
-			log.debug("Server %s :: Processing core show help confbridge..." % servername)
-			result = "\n".join(result)
-			if not "no such command" in result.lower():
-				server.meetmeType = "confbridge"
-				
-		log.debug("Server %s :: Checking if server has confbridge..." % servername)
-		server.pushTask(server.ami.command, "core show help confbridge") \
-			.addCallbacks(onGetHelpConfbridge, self._onAmiCommandFailure, errbackArgs = (servername, "Error checking confbridge"))
-				
+		def onGetMeetmeConfig(result):
+			log.debug("Server %s :: Processing meetme.conf..." % servername)
+			for k, v in result.items():
+				if v.startswith("conf="):
+					meetmeroom = v.replace("conf=", "")
+					if (self.displayMeetmesDefault and not server.displayMeetmes.has_key(meetmeroom)) or (not self.displayMeetmesDefault and server.displayMeetmes.has_key(meetmeroom)):
+						self._createMeetme(servername, meetme = meetmeroom)
+
+		log.debug("Server %s :: Requesting meetme.conf..." % servername)
+		server.pushTask(server.ami.getConfig, 'meetme.conf') \
+			.addCallbacks(onGetMeetmeConfig, self._onAmiCommandFailure, errbackArgs = (servername, "Error Requesting meetme.conf"))
+		
 		# Queues
 		def onQueueStatus(events):
 			log.debug("Server %s :: Processing Queues..." % servername)
@@ -1798,19 +1768,6 @@ class Monast:
 		server.pushTask(server.ami.collectDeferred, {'Action': 'QueueStatus'}, 'QueueStatusComplete') \
 			.addCallbacks(onQueueStatus, self._onAmiCommandFailure, errbackArgs = (servername, "Error Requesting Queue Status"))
 		
-		## Custom Peer Status on ASTDB
-		def onCustomPeerStatus(events):
-			log.debug("Server %s :: Processing Custom Peer Status from ASTDB..." % servername)
-			for line in events:
-				if line.lower().startswith("/monast/peerstatus/"):
-					key, value = [i.strip() for i in line.split(":", 1)]
-					tech, peer = key.replace("/Monast/PeerStatus/", "").split("/")
-					self._updatePeer(servername, channeltype = tech, peername = peer, customStatus = value, _log = "Custom Peer Status on ASTDB")
-			
-		log.debug("Server %s :: Requesting Custom Peer Status from ASTDB..." % servername)
-		server.pushTask(server.ami.command, "database show") \
-			.addCallbacks(onCustomPeerStatus, self._onAmiCommandFailure, errbackArgs = (servername, "Error Requesting Custom Peer Status from ASTDB"))
-		
 		## Run Task Channels Status
 		reactor.callWhenRunning(self.taskCheckStatus, servername)
 	
@@ -1820,14 +1777,6 @@ class Monast:
 	def taskCheckStatus(self, servername):
 		log.info("Server %s :: Requesting asterisk status..." % servername)
 		server = self.servers.get(servername)
-		
-		## Bridges Status
-		def onBridgeListComplete(events):
-			for event in events:
-				self.handlerEventBridgeCreate(server.ami, event)
-		if server.version >= 13:
-			server.pushTask(server.ami.bridgelist) \
-				.addCallbacks(onBridgeListComplete, self._onAmiCommandFailure, errbackArgs = (servername, "Error Requesting Bridge List"))
 		
 		## Channels Status
 		def onStatusComplete(events):
@@ -1839,10 +1788,9 @@ class Monast:
 			for event in events:
 				uniqueid        = event.get('uniqueid')
 				channel         = event.get('channel')
-				bridgeuniqueid  = event.get("bridgeid")
 				bridgedchannel  = event.get('bridgedchannel', event.get('link'))
 				seconds         = int(event.get('seconds', 0))
-
+				
 				tech, chan = channel.rsplit('-', 1)[0].split('/', 1)
 				try:
 					callsCounter[(tech, chan)] += 1
@@ -1857,16 +1805,9 @@ class Monast:
 					state          = event.get('channelstatedesc', event.get('state')),
 					calleridnum    = event.get('calleridnum'),
 					calleridname   = event.get('calleridname'),
-					bridgeuniqueid = bridgeuniqueid,
 					_isCheckStatus = True,
 					_log           = "-- By Status Request"
 				)
-				
-				if bridgeuniqueid:
-					self.handlerEventBridgeEnter(server.ami, event)
-					for unid, c in server.status.channels.items():
-						if c.channel != channel and c.bridgeuniqueid == bridgeuniqueid:
-							bridgedchannel = c.channel
 				
 				## Create bridge if not exists
 				if channelCreated and bridgedchannel:
@@ -2001,9 +1942,6 @@ class Monast:
 		if type == "meetmeInviteUser":
 			application = "Meetme"
 			data        = "%s%sd" % (destination, [",", "|"][server.version == 1.4])
-			if server.meetmeType == "confbridge":
-				application = "Confbridge"
-				data        = destination
 			originates.append((channel, context, exten, priority, timeout, callerid, account, application, data, variable, async))
 			logs.append("Invite from %s to %s(%s)" % (channel, application, data))
 		
@@ -2011,9 +1949,6 @@ class Monast:
 			dynamic     = not server.status.meetmes.has_key(destination)
 			application = "Meetme"
 			data        = "%s%sd" % (destination, [",", "|"][server.version == 1.4])
-			if server.meetmeType == "confbridge":
-				application = "Confbridge"
-				data        = destination
 			numbers     = source.replace('\r', '').split('\n')
 			for number in [i.strip() for i in numbers if i.strip()]:
 				channel     = "Local/%s@%s" % (number, context)
@@ -2120,34 +2055,38 @@ class Monast:
 		server.pushTask(server.ami.stopMonitor, channel) \
 			.addErrback(self._onAmiCommandFailure, servername, "Error Executting Monitor Stop on Channel: %s" % channel)
 			
-	def clientAction_QueueMemberPause(self, session, action):
+	#def clientAction_QueueMemberPause(self, session, action):
+	def clientAction_QueuePause(self, session, action):
 		servername = action['server'][0]
 		queue      = action['queue'][0]
-		location   = action['location'][0]
+		#location   = action['location'][0]
+		location   = action['interface'][0]
 		
 		log.info("Server %s :: Executting Client Action Queue Member Pause: %s -> %s..." % (servername, queue, location))
 		server = self.servers.get(servername)
 		server.pushTask(server.ami.queuePause, queue, location, True) \
 			.addErrback(self._onAmiCommandFailure, servername, "Error Executting Queue Member Pause: %s -> %s" % (queue, location))
 			
-	def clientAction_QueueMemberUnpause(self, session, action):
+	#def clientAction_QueueMemberUnpause(self, session, action):
+	def clientAction_QueueUnpause(self, session, action):
 		servername = action['server'][0]
 		queue      = action['queue'][0]
-		location   = action['location'][0]
+		#location   = action['location'][0]
+		location   = action['interface'][0]
 		
 		log.info("Server %s :: Executting Client Action Queue Member Unpause: %s -> %s..." % (servername, queue, location))
 		server = self.servers.get(servername)
 		server.pushTask(server.ami.queuePause, queue, location, False) \
 			.addErrback(self._onAmiCommandFailure, servername, "Error Executting Queue Member Unpause: %s -> %s" % (queue, location))
 			
-	def clientAction_QueueMemberAdd(self, session, action):
+	#def clientAction_QueueMemberAdd(self, session, action):
+	def clientAction_QueueAdd(self, session, action):
 		servername = action['server'][0]
 		queue      = action['queue'][0]
-		location   = action['location'][0]
+		#location   = action['location'][0]
+		location   = action['interface'][0]
 		external   = action.get('external', [False])[0]
 		membername = action.get('membername', [location])[0]
-		penalty    = action.get('penalty', [0])[0]
-		stateIface = action.get('stateInterface', [None])[0]
 		
 		if not external:
 			tech, peer = location.split('/')
@@ -2157,14 +2096,16 @@ class Monast:
 		
 		log.info("Server %s :: Executting Client Action Queue Member Add: %s -> %s..." % (servername, queue, location))
 		server = self.servers.get(servername)
-		server.pushTask(server.ami.queueAdd, queue, location, penalty, False, membername, stateIface) \
+		server.pushTask(server.ami.queueAdd, queue, location, 0, False, membername) \
 			.addErrback(self._onAmiCommandFailure, servername, "Error Executting Queue Member Add: %s -> %s" % (queue, location))
 
 			
-	def clientAction_QueueMemberRemove(self, session, action):
+	#def clientAction_QueueMemberRemove(self, session, action):
+	def clientAction_QueueRemove(self, session, action):
 		servername = action['server'][0]
 		queue      = action['queue'][0]
-		location   = action['location'][0]
+		#location   = action['location'][0]
+		location   = action['interface'][0]
 		
 		log.info("Server %s :: Executting Client Action Queue Member Remove: %s -> %s..." % (servername, queue, location))
 		server = self.servers.get(servername)
@@ -2175,20 +2116,12 @@ class Monast:
 		servername = action['server'][0]
 		meetme     = action['meetme'][0]
 		usernum    = action['usernum'][0]
-		channel    = action['channel'][0]
 		
+		log.info("Server %s :: Executting Client Action Meetme Kick: %s -> %s..." % (servername, meetme, usernum))
 		server = self.servers.get(servername)
-		
-		if server.meetmeType == "meetme":
-			log.info("Server %s :: Executting Client Action Meetme Kick: %s -> %s..." % (servername, meetme, usernum))
-			server.pushTask(server.ami.command, "meetme kick %s %s" % (meetme, usernum)) \
-				.addErrback(self._onAmiCommandFailure, servername, "Error Executting Client Action Meetme Kick: %s -> %s..." % (meetme, usernum))
-				
-		if server.meetmeType == "confbridge":
-			log.info("Server %s :: Executting Client Action Confbridge Kick: %s -> %s..." % (servername, meetme, channel))
-			server.pushTask(server.ami.command, "confbridge kick %s %s" % (meetme, channel)) \
-				.addErrback(self._onAmiCommandFailure, servername, "Error Executting Client Action Confbridge Kick: %s -> %s..." % (meetme, channel))
-				
+		server.pushTask(server.ami.command, "meetme kick %s %s" % (meetme, usernum)) \
+			.addErrback(self._onAmiCommandFailure, servername, "Error Executting Client Action Meetme Kick: %s -> %s..." % (meetme, usernum))
+			
 	def clientAction_SpyChannel(self, session, action):
 		servername = action['server'][0]
 		server     = self.servers.get(servername)
@@ -2221,26 +2154,6 @@ class Monast:
 	##
 	## Event Handlers
 	##
-	def handlerEventUserEvent (self, ami, event):
-		log.debug("Server %s :: Processing Event UserEvent..." % ami.servername)
-		
-		UserEvent = event.get("userevent", None)
-		if UserEvent == "MonastEvent":
-			MonastEvent = event.get("monastevent", None)
-			if MonastEvent == "PeerStatus":
-				"""
-				* To Set Custom Peer Status:
-				Set(DB(Monast/PeerStatus/${CHANNEL(channeltype)}/${CHANNEL(peername)})=DND);
-				UserEvent(MonastEvent,MonastEvent: PeerStatus, Peer: ${CHANNEL(channeltype)}/${CHANNEL(peername)}, Status: DND);
-				
-				* To Clear Custom Peer Status:
-				Set(tmp=${DB_DELETE(Monast/PeerStatus/${CHANNEL(channeltype)}/${CHANNEL(peername)})});
-				UserEvent(MonastEvent,MonastEvent: PeerStatus, Peer: ${CHANNEL(channeltype)}/${CHANNEL(peername)}, Status:);
-				"""
-				tech, peer = event.get("peer", "/").split("/")
-				status     = event.get("status", "")
-				self._updatePeer(ami.servername, channeltype = tech, peername = peer, customStatus = status, _log = "change status by UserEvent")
-	
 	def handlerEventReload(self, ami, event):
 		log.debug("Server %s :: Processing Event Reload..." % ami.servername)
 		
@@ -2301,16 +2214,28 @@ class Monast:
 		gTime  = reTime.search(status)
 		if gTime:
 			time = int(gTime.group(1))
-		
-		if status.startswith('OK'):
-			status = 'Registered'
-		elif status.find('(') != -1:
-			status = status[0:status.find('(')]
-			
+	
+
 		user = '%s/%s' % (channeltype, objectname)
+                
+                log.debug("Server %s :: EventPeerEntry --- STATUS: = %s" % (ami.servername, status))
+               
+               # My status
+                if status.startswith('OK') and objectname not in self.dnd_list:
+			        status = 'Registered'
+                elif status.startswith('OK') and objectname in self.dnd_list:  
+                                status = 'DND'
+		elif status.find('(') != -1:
+			       peer.status = status[0:status.find('(')]
+                               if peer.peername in self.dnd.list:
+                                   self._dnd_list_delete(peer.peername)
+                                   log.debug("Server %s :: Removed from dnd_list peername: %s, dnd_list: %s" % servername, peer.peername,','.join(self.dnd_list))
+			
 		
 		if (self.displayUsersDefault and not server.displayUsers.has_key(user)) or (not self.displayUsersDefault and server.displayUsers.has_key(user)):
-			self._createPeer(
+		    
+		    log.debug("Server %s :: EventPeerEntry --- Peer = %s" % (ami.servername, user))
+                    self._createPeer(
 				ami.servername,
 				channeltype = channeltype,
 				peername    = objectname,
@@ -2325,7 +2250,7 @@ class Monast:
 			command = '%s show %s %s' % (channeltype.lower(), type, objectname)
 			
 			def onShowPeer(response):
-				log.debug("Server %s :: Processing %s..." % (ami.servername, command))
+				log.debug("Server %s :: ----- onShowPeer ---- Processing %s..." % (ami.servername, command))
 				result    = '\n'.join(response)
 				callerid  = None
 				context   = None
@@ -2352,14 +2277,15 @@ class Monast:
 						gVar = re.search('^[\s]+([^=]*)=(.*)', line)
 						if gVar:
 							variables.append("%s=%s" % (gVar.group(1).strip(), gVar.group(2).strip()))
-				
+			#Added status = status	
 				self._updatePeer(
 					ami.servername, 
 					channeltype = channeltype, 
 					peername    = objectname,
 					callerid    = [callerid, objectname][callerid == "--"],
 					context     = context,
-					variables   = variables
+					variables   = variables,
+                                        status      = status
 				)
 					
 			server.pushTask(server.ami.command, command) \
@@ -2373,11 +2299,96 @@ class Monast:
 		time    = event.get('time')
 		channeltype, peername = channel.split('/', 1)
 		
-		if time:
+                log.debug("Server %s :: ----  Event PeerStatus --- peername: %s --- status: %s" % (ami.servername, peername, status))
+	        
+                if (status == 'Unreachable' or status == 'Unregistered' or status == 'Unknown') and peername in self.dnd_list:
+                        self._dnd_list_delete(peername)
+                        log.debug("Server %s :: ---- Event PeerStatus --- Removed from dnd_list peername: %s, dnd_list: %s" %(ami.servername, peername, ','.join(self.dnd_list)))
+
+                if time:
 			self._updatePeer(ami.servername, channeltype = channeltype, peername = peername, status = status, time = time)
 		else:
 			self._updatePeer(ami.servername, channeltype = channeltype, peername = peername, status = status)
-		
+    
+        
+        # Add peer from dnd_list file to self.dnd_list list 
+        def _dnd_list_read(self):
+            if os.path.exists("/opt/monast/dnd_list"):
+                    f = open('/opt/monast/dnd_list', 'r')
+                    self.dnd_list[:] = [] 
+                    self.dnd_list = [line.strip() for line in f]
+                    f.close()
+                    log.debug("Server :: _dnd_list_read() dnd_list: %s" %(','.join(self.dnd_list)))    
+            else:
+                    log.error("Server :: _dnd_list_read() ERROR: No such file /opt/monast/dnd_list")
+                    f = open('/opt/monast.dnd_list', 'w')
+                    f.close()
+                    log.error("Server :: _dnd_list_read() INFO: File /opt/monast/dnd_list created")
+        
+        # Add peer to dnd_list file and then call self._dnd_list_add() 
+        def _dnd_list_add(self, peer):
+            if os.path.exists("/opt/monast/dnd_list"):
+                    f = open('/opt/monast/dnd_list', 'a')
+                    f.write('%03s\n' % peer)
+                    f.close()
+                    self._dnd_list_read()
+                    log.debug("Server :: _dnd_list_add() dnd_list: %s" %(','.join(self.dnd_list)))
+            else:
+                    # 1) Create file dnd_list
+                    log.error("Server :: _dnd_list_add() ERROR: No such file /opt/monast/dnd_list")
+                    f = open('/opt/monast.dnd_list', 'w')
+                    f.close()
+                    log.error("Server :: _dnd_list_add() INFO: File /opt/monast/dnd_list created")
+                    # 2) Add peer to dnd_list
+                    f = open('/opt/monast/dnd_list', 'a')
+                    f.write('%03s\n' % peer)
+                    f.close()
+                    # 3) Add peer from dnd_list file to self.dnd_list list 
+                    self._dnd_list_read()
+                    log.debug("Server :: _dnd_list_add(). File dnd_list created and peer %s added to dnd_list: %s" %(peer, ','.join(self.dnd_list)))
+
+        # Delete peer from dnd_list file and then call self._dnd_list_read()
+        def _dnd_list_delete(self, peer):
+            if os.path.exists("/opt/monast/dnd_list"):
+                    log.debug("Server :: _dnd_list_delete() dnd_list: %s, peer = %s" %(','.join(self.dnd_list), peer))
+                    f = open('/opt/monast/dnd_list', 'r+')
+                    d = f.readlines()
+                    f.seek(0)
+                    peer = str(peer)+"\n"
+                    for i in d:
+                       if i != peer:
+                         f.write(i)
+                    f.truncate()
+                    f.close()
+                    self._dnd_list_read()
+                    log.debug("Server :: _dnd_list_delete() dnd_list: %s" %(','.join(self.dnd_list)))
+            else:
+                    log.error("Server :: _dnd_list_delete() ERROR: No such file /opt/monast/dnd_list")
+                    f = open('/opt/monast.dnd_list', 'w')
+                    f.close()
+                    log.error("Server :: _dnd_list_delete() INFO: File /opt/monast/dnd_list created")
+        
+        def handlerEventUserEvent(self, ami, event):
+		log.debug("Server %s :: Processing Event ----------------------  UserEvent" % ami.servername)
+		channel = event.get('channel')
+		status  = event.get('status')
+		dnd     = event.get('dnd') 
+		peername1 = event.get('peername')
+
+		tech, chan = channel.split('/', 1)
+                
+                if dnd == "enabled":
+                    if peername1 not in self.dnd_list:
+                        self._dnd_list_add(peername1)
+                elif dnd == "disabled":
+                    if peername1 in self.dnd_list:
+                        self._dnd_list_delete(peername1)
+
+                log.debug("Server  :: UserEvent -------------------- peername: %s ----- channeltype: %s" % (peername1,  tech))
+                log.debug("Server  :: UserEvent -------------------- peername: %s " % peername1)
+                log.debug("Server  :: UserEvent -------------------- peername: %s ---- dnd_list: %s" %( peername1, ','.join(self.dnd_list)))
+                self._updatePeer(ami.servername, channeltype = tech, peername = peername1, _log = "DND (%s)" % status)
+    
 	def handlerEventNewchannel(self, ami, event):
 		log.debug("Server %s :: Processing Event Newchannel..." % ami.servername)
 		server   = self.servers.get(ami.servername)
@@ -2394,26 +2405,8 @@ class Monast:
 			_log         = "-- Newchannel"
 		)
 		
-	def handlerEventDAHDIChannel(self, ami, event):
-		log.debug("Server %s :: Processing Event DAHDIChannel..." % ami.servername)
-		server       = self.servers.get(ami.servername)
-		uniqueid     = event.get('uniqueid')
-		channel      = event.get('channel')
-		dahdispan    = event.get('dahdispan')
-		dahdichannel = event.get('dahdichannel')
-		
-		self._updateChannel(
-			ami.servername,
-			uniqueid     = uniqueid,
-			channel      = channel,
-			dahdispan    = dahdispan,
-			dahdichannel = dahdichannel,
-			_action      = "updateDahdiCallsCounter",
-			_log         = "Setting DAHDISpan and DAHDIChannel: %s/%s" % (dahdispan, dahdichannel)
-		)
-		
-	def handlerEventNewstate(self, ami, event):
-		log.debug("Server %s :: Processing Event Newstate..." % ami.servername)
+	def handlerEventNewState(self, ami, event):
+		log.debug("Server %s :: Processing Event NewState..." % ami.servername)
 		server       = self.servers.get(ami.servername)		
 		uniqueid     = event.get('uniqueid')
 		channel      = event.get('channel')
@@ -2452,7 +2445,7 @@ class Monast:
 		
 		if not cloneUniqueid:
 			log.warn("Server %s :: Detected BUG on Asterisk. Masquerade Event does not have cloneuniqueid and originaluniqueid properties. " % ami.servername \
-				+ "See https://issues.asterisk.org/jira/browse/16555 for more informations.")
+				+ "See https://issues.asterisk.org/view.php?id=16555 for more informations.")
 			return
 		
 		clone = server.status.channels.get(cloneUniqueid)
@@ -2505,7 +2498,8 @@ class Monast:
 			log.debug("Server %s :: Queue update, call hangup: %s -> %s", ami.servername, queueCall.client.get('queue'), uniqueid)
 			del server.status.queueCalls[uniqueid]
 			if queueCall.member:
-				self.http._addUpdate(servername = ami.servername, action = "RemoveQueueCall", uniqueid = uniqueid, queue = queueCall.client.get('queue'), location = queueCall.member.get('location'))
+				#self.http._addUpdate(servername = ami.servername, action = "RemoveQueueCall", uniqueid = uniqueid, queue = queueCall.client.get('queue'), location = queueCall.member.get('location'))
+				self.http._addUpdate(servername = ami.servername, action = "RemoveQueueCall", uniqueid = uniqueid, queue = queueCall.client.get('queue'), location = queueCall.member.get('interface'))
 				queue = server.status.queues.get(queueCall.client.get('queue'))
 				queue.completed += 1
 				self.http._addUpdate(servername = ami.servername, subaction = 'Update', **queue.__dict__.copy())
@@ -2514,7 +2508,7 @@ class Monast:
 		# Detect QueueClient
 		for qname, clientuniqueid in server.status.queueClients.items():
 			if clientuniqueid == uniqueid:
-				self._updateQueue(ami.servername, queue = qname, event = "Leave", uniqueid = uniqueid, _log = "By Channel Hangup")
+				self._updateQueue(ami.servername, queue = qname, event = "QueueCallerLeave", uniqueid = uniqueid, _log = "By Channel Hangup")
 		
 	def handlerEventDial(self, ami, event):
 		log.debug("Server %s :: Processing Event Dial..." % ami.servername)
@@ -2527,7 +2521,7 @@ class Monast:
 				uniqueid        = event.get('uniqueid', event.get('srcuniqueid')),
 				channel         = event.get('channel', event.get('source')),
 				bridgeduniqueid = event.get('destuniqueid'),
-				bridgedchannel  = event.get('destination', event.get('destchannel')),
+				bridgedchannel  = event.get('destination'),
 				status          = 'Dial',
 				dialtime        = time.time(),
 				_log            = '-- Dial Begin'
@@ -2544,30 +2538,32 @@ class Monast:
 			if queueCall:
 				queueCall.link = False
 				if queueCall.member:
-					log.debug("Server %s :: Queue update, client -> member call unlink: %s -> %s -> %s", ami.servername, queueCall.client.get('queue'), uniqueid, queueCall.member.get('location'))
-					self.http._addUpdate(servername = ami.servername, action = "RemoveQueueCall", uniqueid = uniqueid, queue = queueCall.client.get('queue'), location = queueCall.member.get('location'))
+					#log.debug("Server %s :: Queue update, client -> member call unlink: %s -> %s -> %s", ami.servername, queueCall.client.get('queue'), uniqueid, queueCall.member.get('location'))
+					log.debug("Server %s :: Queue update, client -> member call unlink: %s -> %s -> %s", ami.servername, queueCall.client.get('queue'), uniqueid, queueCall.member.get('interface'))
+					self.http._addUpdate(servername = ami.servername, action = "RemoveQueueCall", uniqueid = uniqueid, queue = queueCall.client.get('queue'), location = queueCall.member.get('interface'))
+					#self.http._addUpdate(servername = ami.servername, action = "RemoveQueueCall", uniqueid = uniqueid, queue = queueCall.client.get('queue'), location = queueCall.member.get('location'))
 					if logging.DUMPOBJECTS:
 						log.debug("Object Dump:%s", queueCall)
 		else:
 			log.warning("Server %s :: Unhandled Dial SubEvent %s", ami.servername, subevent)
-			
-	def handlerEventDialBegin(self, ami, event):
-		log.debug("Server %s :: Processing Event DialBegin..." % ami.servername)
-		server = self.servers.get(ami.servername)
-		if not event.get("subevent"):
-			event["subevent"] = "begin"
-		log.debug("Server %s :: Redirecting Event DialBegin to Dial..." % ami.servername)
-		self.handlerEventDial(ami, event)
-		
-	def handlerEventLink(self, ami, event):
+	
+        def handlerEventDialBegin(self, ami, event):
+                log.debug("Server %s :: Processing Event DialBegin..." % ami.servername)
+                server = self.servers.get(ami.servername)
+                if not event.get("subevent"):
+                   event["subevent"] = "begin"
+                log.debug("Server %s :: Redirecting Event DialBegin to Dial..." % ami.servername)
+                self.handlerEventDial(ami, event)
+
+        def handlerEventLink(self, ami, event):
 		log.debug("Server %s :: Processing Event Link..." % ami.servername)
 		server          = self.servers.get(ami.servername)
-		uniqueid        = event.get('uniqueid1', event.get('srcuniqueid'))
-		channel         = event.get('channel1', event.get('srcchannel'))
-		bridgeduniqueid = event.get('uniqueid2', event.get('dstuniqueid'))
-		bridgedchannel  = event.get('channel2', event.get('dstchannel'))
-		callerid        = event.get('callerid1', event.get('srccallerid'))
-		bridgedcallerid = event.get('callerid2', event.get('dstcallerid'))
+		uniqueid        = event.get('uniqueid1')
+		channel         = event.get('channel1')
+		bridgeduniqueid = event.get('uniqueid2')
+		bridgedchannel  = event.get('channel2')
+		callerid        = event.get('callerid1')
+		bridgedcallerid = event.get('callerid2')
 		
 		bridgekey = self._locateBridge(ami.servername, uniqueid = uniqueid, bridgeduniqueid = bridgeduniqueid)
 		if bridgekey:
@@ -2613,10 +2609,10 @@ class Monast:
 	def handlerEventUnlink(self, ami, event):
 		log.debug("Server %s :: Processing Event Unlink..." % ami.servername)
 		server          = self.servers.get(ami.servername)
-		uniqueid        = event.get('uniqueid1', event.get('srcuniqueid'))
-		channel         = event.get('channel1', event.get('srcchannel'))
-		bridgeduniqueid = event.get('uniqueid2', event.get('dstuniqueid'))
-		bridgedchannel  = event.get('channel2', event.get('dstchannel'))
+		uniqueid        = event.get('uniqueid1')
+		channel         = event.get('channel1')
+		bridgeduniqueid = event.get('uniqueid2')
+		bridgedchannel  = event.get('channel2')
 		self._updateBridge(
 			ami.servername, 
 			uniqueid        = uniqueid, 
@@ -2632,64 +2628,16 @@ class Monast:
 		if queueCall:
 			queueCall.link = False
 			if queueCall.member:
-				log.debug("Server %s :: Queue update, client -> member call unlink: %s -> %s -> %s", ami.servername, queueCall.client.get('queue'), uniqueid, queueCall.member.get('location'))
-				self.http._addUpdate(servername = ami.servername, action = "RemoveQueueCall", uniqueid = uniqueid, queue = queueCall.client.get('queue'), location = queueCall.member.get('location'))
+				log.debug("Server %s :: Queue update, client -> member call unlink: %s -> %s -> %s", ami.servername, queueCall.client.get('queue'), uniqueid, queueCall.member.get('interface'))
+				#log.debug("Server %s :: Queue update, client -> member call unlink: %s -> %s -> %s", ami.servername, queueCall.client.get('queue'), uniqueid, queueCall.member.get('location'))
+				self.http._addUpdate(servername = ami.servername, action = "RemoveQueueCall", uniqueid = uniqueid, queue = queueCall.client.get('queue'), location = queueCall.member.get('interface'))
+				#self.http._addUpdate(servername = ami.servername, action = "RemoveQueueCall", uniqueid = uniqueid, queue = queueCall.client.get('queue'), location = queueCall.member.get('location'))
 				if logging.DUMPOBJECTS:
 					log.debug("Object Dump:%s", queueCall)
 	
 	def handlerEventBridge(self, ami, event):
 		log.debug("Server %s :: Processing Event Bridge..." % ami.servername)
 		self.handlerEventLink(ami, event)
-	
-	# Bridge events (asterisk 13)
-	__bridgeHelper = {}
-	def handlerEventBridgeCreate(self, ami, event):
-		log.debug("Server %s :: Processing Event BridgeCreate..." % ami.servername)
-		bridgeuniqueid = event.get("bridgeuniqueid")
-		if not self.__bridgeHelper.has_key(bridgeuniqueid):
-			self.__bridgeHelper[bridgeuniqueid] = {
-				"bridgeuniqueid" : bridgeuniqueid,
-				"srcuniqueid"    : None,
-				"srcchannel"     : None,
-				"srccallerid"    : None,
-				"dstuniqueid"    : None,
-				"dstchannel"     : None,
-				"dstcallerid"    : None
-			}
-		
-	def handlerEventBridgeEnter(self, ami, event):
-		log.debug("Server %s :: Processing Event BridgeEnter..." % ami.servername)
-		bridgeuniqueid = event.get("bridgeuniqueid", event.get("bridgeid"))
-		if self.__bridgeHelper.has_key(bridgeuniqueid):
-			if event.get("uniqueid") == event.get("linkedid"):
-				self.__bridgeHelper[bridgeuniqueid]["srcuniqueid"] = event.get("uniqueid")
-				self.__bridgeHelper[bridgeuniqueid]["srcchannel"]  = event.get("channel")
-				self.__bridgeHelper[bridgeuniqueid]["srccallerid"] = "%s <%s>" % (event.get("calleridname"), event.get("calleridnum"))
-			else:
-				self.__bridgeHelper[bridgeuniqueid]["dstuniqueid"] = event.get("uniqueid")
-				self.__bridgeHelper[bridgeuniqueid]["dstchannel"]  = event.get("channel")
-				self.__bridgeHelper[bridgeuniqueid]["dstcallerid"] = "%s <%s>" % (event.get("calleridname"), event.get("calleridnum"))
-				
-			if self.__bridgeHelper[bridgeuniqueid]["srcuniqueid"] and self.__bridgeHelper[bridgeuniqueid]["dstuniqueid"]:
-				self.handlerEventLink(ami, self.__bridgeHelper[bridgeuniqueid])
-		else:
-			log.warning("Server %s :: Bridge %s not found..." % (ami.servername, bridgeuniqueid))
-		
-	def handlerEventBridgeLeave(self, ami, event):
-		log.debug("Server %s :: Processing Event BridgeLeave..." % ami.servername)
-		bridgeuniqueid = event.get("bridgeuniqueid")
-		if self.__bridgeHelper.has_key(bridgeuniqueid):
-			self.handlerEventUnlink(ami, self.__bridgeHelper[bridgeuniqueid])
-		else:
-			log.warning("Server %s :: Bridge %s not found..." % (ami.servername, bridgeuniqueid))
-		
-	def handlerEventBridgeDestroy(self, ami, event):
-		log.debug("Server %s :: Processing Event BridgeDestroy..." % ami.servername)
-		bridgeuniqueid = event.get("bridgeuniqueid")
-		if self.__bridgeHelper.has_key(bridgeuniqueid):
-			del self.__bridgeHelper[bridgeuniqueid]
-		else:
-			log.warning("Server %s :: Bridge %s not found..." % (ami.servername, bridgeuniqueid))
 	
 	# Meetme Events
 	def handlerEventMeetmeJoin(self, ami, event):
@@ -2708,6 +2656,7 @@ class Monast:
 			}  
 		)
 		
+	# Meetme Events
 	def handlerEventMeetmeLeave(self, ami, event):
 		log.debug("Server %s :: Processing Event MeetmeLeave..." % ami.servername)
 		meetme = event.get("meetme")
@@ -2723,42 +2672,6 @@ class Monast:
 				'calleridname' : event.get("calleridname"),
 			}  
 		)
-		
-	# Confbridge Events
-	def handlerEventConfbridgeJoin(self, ami, event):
-		log.debug("Server %s :: Processing Event ConfbridgeJoin..." % ami.servername)
-		server     = self.servers.get(ami.servername)
-		conference = event.get("conference")
-		usernum    = 1
-		
-		conferenceRoom = server.status.meetmes.get(conference)
-		if conferenceRoom:
-			listNums = conferenceRoom.users.keys()
-			listNums.sort()
-			usernum = listNums[-1] + 1
-
-		event["meetme"]  = conference
-		event["usernum"] = usernum
-		
-		self.handlerEventMeetmeJoin(ami, event)
-		
-	def handlerEventConfbridgeLeave(self, ami, event):
-		log.debug("Server %s :: Processing Event ConfbridgeLeave..." % ami.servername)
-		server     = self.servers.get(ami.servername)
-		conference = event.get("conference")
-		usernum    = None
-		
-		conferenceRoom = server.status.meetmes.get(conference)
-		if conferenceRoom:
-			for usernum, user in conferenceRoom.users.items():
-				if user.get("uniqueid") == event.get("uniqueid"):
-					break
-				usernum = None
-		
-		if usernum:
-			event["meetme"]  = conference
-			event["usernum"] = usernum
-			self.handlerEventMeetmeLeave(ami, event)
 		
 	# Parked Calls Events
 	def handlerEventParkedCall(self, ami, event):
@@ -2802,17 +2715,17 @@ class Monast:
 		log.debug("Server %s :: Processing Event QueueMemberStatus..." % ami.servername)
 		self._updateQueue(ami.servername, **event)
 		
-	def handlerEventQueueMemberPaused(self, ami, event):
-		log.debug("Server %s :: Processing Event QueueMemberPaused..." % ami.servername)
+	def handlerEventQueueMemberPause(self, ami, event):
+		log.debug("Server %s :: Processing Event QueueMemberPause..." % ami.servername)
 		
 		server   = self.servers.get(ami.servername)
 		queue    = event.get('queue')
-		location = event.get('location', event.get("interface"))
+		location   = kw.get('location', kw.get('interface'))
+                #location = event.get('location')
 		memberid = (queue, location)
 		member   = server.status.queueMembers.get(memberid)
 		
 		if member:
-			event['event']      = "QueueMemberPaused" ## Asterisk 14 (devs removed 'd' at end of event name... AFF)
 			event['callstaken'] = member.callstaken
 			event['lastcall']   = member.lastcall
 			event['penalty']    = member.penalty
@@ -2857,7 +2770,7 @@ class Monast:
 		channel      = self._lookupChannel(ami.servername, spyeechannel)
 		
 		if channel:
-			self._updateChannel(ami.servername, uniqueid = channel.uniqueid, spy = True, spyer = spyerchannel)
+			self._updateChannel(ami.servername, uniqueid = channel.uniqueid, spy = True)
 		
 	def handlerEventChanSpyStop(self, ami, event):
 		log.debug("Server %s :: Processing Event ChanSpyStop..." % ami.servername)
@@ -2865,19 +2778,8 @@ class Monast:
 		channel      = self._lookupChannel(ami.servername, spyeechannel)
 		
 		if channel:
-			self._updateChannel(ami.servername, uniqueid = channel.uniqueid, spy = False, spyer = None)
-		else:
-			## search spyee by spyer...
-			server       = self.servers.get(ami.servername)
-			spyerchannel = event.get('spyerchannel')
-			channel      = None
-			
-			for uniqueid, channel in server.status.channels.items():
-				if channel.spy and channel.spyer == spyerchannel:
-					self._updateChannel(ami.servername, uniqueid = channel.uniqueid, spy = False, spyer = None)
-					break
-			
-					
+			self._updateChannel(ami.servername, uniqueid = channel.uniqueid, spy = False)
+		
 ##
 ## Daemonizer
 ##

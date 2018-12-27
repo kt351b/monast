@@ -50,6 +50,14 @@ nothing has happened to write to the log.
 If the peer DND status is displayed incorrectly, delete or add the peername on the monast server to the 
 /opt/monast/dnd_list file and restart monast - /etc/init.d/monast restart.
 
+#### IP-phone settings:
+- CISCO phones: here is the link how to congfigure DND PSK for sending a call to Asterisk - http://www.funkynerd.com/the-definitive-guide-to-asterisk-dnd-with-the-cisco-spa5xx-sip-phone
+- Grandstream phones: go to Accounts -> Call Settings, find there "DND Call Feature On" and "DND Call Feature Off",
+write there a number and phone will dial that number when the DND mode is activated/deactivated
+- Yealink phones: the same as Grandstream
+- Linksys phones: go to System -> Optional Network Configuration, find there "Debug Server" and write your server 
+(with configured rsyslog) there.
+
 
 #### Original README comment:
 Before playing with Monast you must install a couple of things in

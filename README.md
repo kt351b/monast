@@ -1,5 +1,5 @@
 
-#### My comment:
+#### Comment to my fork:
 I had an issue to make monast project know about DND state at the phones and faced with a problem 
 that not all phones have possibilitie to make a call to Asterisk while changing it's state to 'DND'.
 

@@ -37,16 +37,22 @@ Scripts (in my server they are at /opt/DND folder):
 - parsednd.py - python script for Monast (use python3.5)
 - peerlist.py - python script, fills monast database, employee table (use python3.5)
 
+Asterisk:
+
+I use Asterisk 14.7.7, so I changed some AMI Events in monast.py to correspond to this Asterisk version.
+You can find extensions.conf in /DND folder - extensions.conf
+
 Logs:
 - /var/log/parsednd.log
 - /var/log/peerlist.log
 - /var/log/DND.log - from this log rsyslog writes the DND status and ip-address of the phone 
 (the line that Linksys sends to syslog)
 
-logrotate is configured to rotate logs once a day. You can find logrotate conf files in /DND/logrotate folder, 
-move them to /etc/logrotate.d folder
+Logrotate:
 
-/var/log/DND.log - creates by logrotate, other logs are created by scripts, if there is no log, it means 
+- logrotate is configured to rotate logs once a day. You can find logrotate conf files in /DND/logrotate folder, 
+move them to /etc/logrotate.d folder
+- /var/log/DND.log - creates by logrotate, other logs are created by scripts, if there is no log, it means 
 nothing has happened to write to the log.
 
 If the peer DND status is displayed incorrectly, delete or add the peername on the monast server to the 

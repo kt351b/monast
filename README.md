@@ -21,7 +21,7 @@ when you turn it off. Asterisk generates AMI "UserEvent" with arguments:
 - DND - enabled or disabled
 - peername 
 
-Then this AMI "UserEvent" catches monast, writes (DND - enabled) or removes (DND - disabled) peer to(from) /opt/monast/dnd_list and changes peer status to 'DND' (I added 'DND' state to monast.py script at line 741)
+Then this AMI "UserEvent" catches monast, writes (DND - enabled) or removes (DND - disabled) peer to(from) /opt/monast/dnd_list and changes peer status to 'DND' (I added 'DND' state to /pymon/monast.py script at line 741)
 
 Linksys phones write debug-log to syslog-server on VoIP-server -> rsyslog pars it and, when finding a line with 
 the word "DND", forms the log file DND.log -> script parsednd.py in the real-time pars this log, accesses the 

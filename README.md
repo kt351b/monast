@@ -50,7 +50,7 @@ Logs:
 
 Logrotate:
 
-- logrotate is configured to rotate logs once a day. You can find logrotate conf files in /DND/logrotate folder, 
+- logrotate is configured to rotate logs weekly. You can find logrotate conf files in /DND/logrotate folder, 
 move them to /etc/logrotate.d folder
 - /var/log/DND.log - creates by logrotate, other logs are created by scripts, if there is no log, it means 
 nothing has happened to write to the log.

@@ -31,7 +31,7 @@ IP-address (current IP-phone ip-address) and peer, then generates AMI "UserEvent
 This AMI "UserEvent" catches monast, writes (DND - enabled) or removes (DND - disabled) peer to(from)
 /opt/monast/dnd_list and changes the peer status at he Web-page.
 
-Scripts (in my server they are at opt/DND folder):
+Scripts (in my server they are at /opt/DND folder):
 - dnd_watch.sh - bash script to check if parsednd.py is running in the screen
 - dnd_restart.sh - restart script parsednd.py
 - parsednd.py - python script for Monast (use python3.5)

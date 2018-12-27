@@ -6,8 +6,8 @@ that not all phones have possibilitie to make a call to Asterisk while changing 
 I mean I didn't find the possibility to make Linksys phones activate DND and make a call to Asterisk 
 at the same time (making a call for generating AMI "UserEvent" for monast) and deactivate DND state
 by one PSK ( programmable soft key). That's why Linksys phones send a debug-log to rsyslog on VoIP-server, 
-then python script parsednd.py parse in real time /var/log/DND.log (that was created by rsyslog)  
-and generates AMI Action "UserEvent" for monast. 
+then python script parsednd.py parse in real time /var/log/DND.log (that was created by rsyslog) and 
+generates AMI Action "UserEvent" for monast. Look at the syslog-ng config at the end of this comment.
 
 Initially, I didn't have a database, but then I had to add it because of a problem with DND on Linksys phones,
 that's why this DND feature is so weird ;)
@@ -43,7 +43,9 @@ Logs:
 - /var/log/DND.log - from this log rsyslog writes the DND status and ip-address of the phone 
 (the line that Linksys sends to syslog)
 
-logrotate is configured to rotate logs once a day. 
+logrotate is configured to rotate logs once a day. You can find logrotate conf files in /DND/logrotate folder, 
+move them to /etc/logrotate.d folder
+
 /var/log/DND.log - creates by logrotate, other logs are created by scripts, if there is no log, it means 
 nothing has happened to write to the log.
 
@@ -57,6 +59,15 @@ write there a number and phone will dial that number when the DND mode is activa
 - Yealink phones: the same as Grandstream
 - Linksys phones: go to System -> Optional Network Configuration, find there "Debug Server" and write your server 
 (with configured rsyslog) there.
+
+#### syslog-ng settings (for Linksys phones):
+Don't forget to add:
+
+@include "/etc/syslog-ng/conf.d/*.conf"
+
+to the end of the /etc/syslog-ng/syslog-ng.conf, then put ipphone.conf from the /DND/rsyslog folder to the 
+/etc/syslog-ng/conf.d/ folder in your server
+
 
 
 #### Original README comment:

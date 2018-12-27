@@ -1,0 +1,10 @@
+/var/log/DND.log {
+missingok
+rotate 4
+monthly
+compress
+delaycompress
+copytruncate
+dateext
+}
+

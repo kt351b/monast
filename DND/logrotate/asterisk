@@ -1,0 +1,13 @@
+/var/log/asterisk/debug
+/var/log/asterisk/messages
+/var/log/asterisk/full {
+missingok
+rotate 100
+daily
+compress
+delaycompress
+copytruncate
+olddir /var/log/asterisk/oldlog
+dateext
+}
+
